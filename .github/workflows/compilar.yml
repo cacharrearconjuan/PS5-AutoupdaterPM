@@ -2,11 +2,13 @@ name: Auto-Compilar PS5 ELF
 
 on:
   push:
+    branches: [ main ]
     paths:
       - '**.c'
       - '**.h'
       - 'Makefile'
-  workflow_dispatch: # Permite ejecutarlo a mano desde la pestaña Actions
+      - '.github/workflows/compilar.yml'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -14,36 +16,42 @@ permissions:
 jobs:
   compilar:
     runs-on: ubuntu-latest
-    # Usamos el contenedor oficial de la comunidad con el SDK de PS5
-    container: 
-      image: ghcr.io/ps5-payload-dev/pacman:latest
 
     steps:
       - name: Descargar el repositorio
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Compilar el Payload
+      - name: Compilar el Payload con PS5 SDK
         run: |
-          # Instalamos la librería libcurl de PS5 por si el Makefile la requiere
-          pacman -Sy --noconfirm ps5-curl || true
-          
-          # Ejecutar el Makefile para generar el .elf
-          make
+          docker run --rm -v "${{ github.workspace }}:/work" -w /work ghcr.io/ps5-payload-dev/pacman:latest /bin/bash -lc '
+            pacman -Syu --noconfirm ps5-payload-sdk ps5-payload-curl
+            export PS5_PAYLOAD_SDK=/opt/pacbrew/ps5/payload-sdk
+            ln -sf /opt/pacbrew/ps5/payload-sdk /opt/ps5-payload-sdk
+            make clean
+            make
+            chmod 666 *.elf
+          '
 
-      - name: Guardar el ELF en el repositorio
+      - name: Guardar el ELF en el repositorio y en Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Dar permisos al directorio virtual para evitar errores de Git
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Añadir el/los archivos .elf recién creados
+
           git add *.elf
-          
-          # Guardar y subir si hay un archivo nuevo o modificado
           if ! git diff --cached --quiet; then
-            git commit -m "🤖 Auto-compilado nuevo .elf tras cambios en el código"
+            git commit -m "Auto-compilado PS5-AutoupdaterPM.elf"
             git push
           else
-            echo "El archivo ELF generado es idéntico, no hay cambios."
+            echo "El archivo ELF en la rama principal ya estaba actualizado."
           fi
+
+          if gh release view v1.0.0 >/dev/null 2>&1; then
+            gh release upload v1.0.0 PS5-AutoupdaterPM.elf --clobber
+          else
+            gh release create v1.0.0 PS5-AutoupdaterPM.elf --title "v1.0.0" --notes "Compilacion automatica de PS5-AutoupdaterPM.elf"
+          fi
+          
