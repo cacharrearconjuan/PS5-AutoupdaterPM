@@ -1,0 +1,49 @@
+name: Auto-Compilar PS5 ELF
+
+on:
+  push:
+    paths:
+      - '**.c'
+      - '**.h'
+      - 'Makefile'
+  workflow_dispatch: # Permite ejecutarlo a mano desde la pestaña Actions
+
+permissions:
+  contents: write
+
+jobs:
+  compilar:
+    runs-on: ubuntu-latest
+    # Usamos el contenedor oficial de la comunidad con el SDK de PS5
+    container: 
+      image: ghcr.io/ps5-payload-dev/pacman:latest
+
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Compilar el Payload
+        run: |
+          # Instalamos la librería libcurl de PS5 por si el Makefile la requiere
+          pacman -Sy --noconfirm ps5-curl || true
+          
+          # Ejecutar el Makefile para generar el .elf
+          make
+
+      - name: Guardar el ELF en el repositorio
+        run: |
+          # Dar permisos al directorio virtual para evitar errores de Git
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Añadir el/los archivos .elf recién creados
+          git add *.elf
+          
+          # Guardar y subir si hay un archivo nuevo o modificado
+          if ! git diff --cached --quiet; then
+            git commit -m "🤖 Auto-compilado nuevo .elf tras cambios en el código"
+            git push
+          else
+            echo "El archivo ELF generado es idéntico, no hay cambios."
+          fi
