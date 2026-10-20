@@ -137,27 +137,34 @@ int main(int argc, char *argv[]) {
     }
 
     char *download_url = NULL;
-    char *src = strstr(json_buf, "source_direct");
-    if (!src) src = strstr(json_buf, "browser_download_url");
-    if (!src) src = strstr(json_buf, "url");
+    
+    // Primero, localizamos el bloque donde está definido pldmgr
+    char *pldmgr_block = strstr(json_buf, "\"name\": \"pldmgr\"");
+    
+    if (pldmgr_block) {
+        // Buscamos la URL solo dentro del bloque de pldmgr
+        char *src = strstr(pldmgr_block, "\"source_direct\"");
+        if (!src) src = strstr(pldmgr_block, "\"browser_download_url\"");
+        if (!src) src = strstr(pldmgr_block, "\"url\"");
 
-    if (src) {
-        char *q1 = strchr(src, ':');
-        if (q1) {
-            q1 = strchr(q1, '"');
+        if (src) {
+            char *q1 = strchr(src, ':');
             if (q1) {
-                q1++;
-                char *q2 = strchr(q1, '"');
-                if (q2) {
-                    *q2 = '\0';
-                    download_url = q1;
+                q1 = strchr(q1, '"');
+                if (q1) {
+                    q1++;
+                    char *q2 = strchr(q1, '"');
+                    if (q2) {
+                        *q2 = '\0';
+                        download_url = q1;
+                    }
                 }
             }
         }
     }
 
     if (!download_url) {
-        pldmgr_notify("Error: URL no encontrada en JSON");
+        pldmgr_notify("Error: URL de pldmgr no encontrada en JSON");
         free(json_buf);
         curl_global_cleanup();
         return -1;
