@@ -23,18 +23,78 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Compilar el Payload con PS5 SDK
+      - name: Instalar PS5 Payload SDK y librerias (libcurl)
         run: |
-          docker run --rm -v "${{ github.workspace }}:/work" -w /work ghcr.io/ps5-payload-dev/pacman:latest /bin/bash -lc '
-            pacman -Syu --noconfirm ps5-payload-sdk ps5-payload-curl
-            export PS5_PAYLOAD_SDK=/opt/pacbrew/ps5/payload-sdk
-            ln -sf /opt/pacbrew/ps5/payload-sdk /opt/ps5-payload-sdk
-            make clean
-            make
-            chmod 666 *.elf
-          '
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm make cmake ninja-build pkg-config git curl jq unzip zstd libarchive-tools
 
-      - name: Guardar el ELF en el repositorio y en Releases
+          sudo mkdir -p /opt/ps5-payload-sdk
+
+          # 1. Instalar el SDK oficial de PS5
+          SDK_ZIP=$(curl -s https://api.github.com/repos/ps5-payload-dev/sdk/releases/latest | jq -r '.assets[]? | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
+          if [ -n "$SDK_ZIP" ]; then
+            curl -sL "$SDK_ZIP" -o /tmp/sdk.zip
+            sudo unzip -q -o /tmp/sdk.zip -d /opt/ps5-payload-sdk
+            PROSPERO_MK=$(find /opt/ps5-payload-sdk -name "prospero.mk" | head -n 1)
+            if [ -n "$PROSPERO_MK" ] && [ "$PROSPERO_MK" != "/opt/ps5-payload-sdk/toolchain/prospero.mk" ]; then
+              SDK_ROOT=$(dirname $(dirname "$PROSPERO_MK"))
+              sudo cp -rf "$SDK_ROOT"/* /opt/ps5-payload-sdk/
+            fi
+          fi
+
+          if [ ! -f /opt/ps5-payload-sdk/toolchain/prospero.mk ]; then
+            git clone --depth 1 https://github.com/ps5-payload-dev/sdk.git /tmp/ps5-sdk
+            make -C /tmp/ps5-sdk
+            sudo make -C /tmp/ps5-sdk install DESTDIR=/
+          fi
+
+          # 2. Intentar descargar precompilados de pacbrew-repo si existen
+          for repo in pacbrew-repo pacbrew; do
+            PKG_URLS=$(curl -s "https://api.github.com/repos/ps5-payload-dev/$repo/releases" | jq -r '.[0].assets[]?.browser_download_url // empty' | grep -E 'ps5-payload-(zlib|mbedtls|curl)-[0-9]' || true)
+            for u in $PKG_URLS; do
+              curl -sL "$u" | sudo bsdtar -xf - -C / || true
+            done
+          done
+
+          if [ -d /opt/pacbrew/ps5/payload-sdk/target/user ]; then
+            sudo cp -rf /opt/pacbrew/ps5/payload-sdk/target/user/* /opt/ps5-payload-sdk/target/user/ || true
+          fi
+
+          # 3. Si curl.h no estaba precompilado, compilar zlib + mbedtls + libcurl con el SDK de PS5
+          if [ ! -f /opt/ps5-payload-sdk/target/user/include/curl/curl.h ]; then
+            export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+            export PATH="/opt/ps5-payload-sdk/bin:$PATH"
+            sudo mkdir -p /opt/ps5-payload-sdk/target/user/include /opt/ps5-payload-sdk/target/user/lib
+
+            # Compilar zlib
+            git clone --depth 1 --branch v1.3.1 https://github.com/madler/zlib.git /tmp/zlib
+            mkdir -p /tmp/zlib/build && cd /tmp/zlib/build
+            sudo -E /opt/ps5-payload-sdk/bin/prospero-cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+            sudo ninja install
+
+            # Compilar mbedtls
+            git clone --depth 1 --branch v3.6.0 https://github.com/Mbed-TLS/mbedtls.git /tmp/mbedtls
+            mkdir -p /tmp/mbedtls/build && cd /tmp/mbedtls/build
+            sudo -E /opt/ps5-payload-sdk/bin/prospero-cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF -DUSE_STATIC_MBEDTLS_LIBRARY=ON
+            sudo ninja install
+
+            # Compilar libcurl (solo HTTP/HTTPS)
+            git clone --depth 1 --branch curl-8_10_1 https://github.com/curl/curl.git /tmp/curl
+            mkdir -p /tmp/curl/build && cd /tmp/curl/build
+            sudo -E /opt/ps5-payload-sdk/bin/prospero-cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_SHARED_LIBS=OFF -DBUILD_CURL_EXE=OFF -DBUILD_TESTING=OFF \
+              -DCURL_USE_MBEDTLS=ON -DHTTP_ONLY=ON -DCURL_USE_LIBPSL=OFF \
+              -DCURL_BROTLI=OFF -DCURL_ZSTD=OFF -DUSE_NGHTTP2=OFF -DUSE_LIBIDN2=OFF
+            sudo ninja install
+          fi
+
+      - name: Compilar PS5-AutoupdaterPM.elf
+        run: |
+          export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+          make clean
+          make
+
+      - name: Guardar el ELF en el repositorio y actualizar Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -46,7 +106,7 @@ jobs:
             git commit -m "Auto-compilado PS5-AutoupdaterPM.elf"
             git push
           else
-            echo "El archivo ELF en la rama principal ya estaba actualizado."
+            echo "El archivo ELF en la rama principal no ha cambiado."
           fi
 
           if gh release view v1.0.0 >/dev/null 2>&1; then
