@@ -1,0 +1,7 @@
+*.o
+*.elf
+*.sha256
+cacert.pem
+cacert_pem.h
+.version
+notas.md
