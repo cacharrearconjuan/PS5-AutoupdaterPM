@@ -1,116 +1,124 @@
-name: Auto-Compilar PS5 ELF
+name: Compilar y publicar release
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
     paths:
       - '**.c'
       - '**.h'
       - 'Makefile'
+      - 'scripts/**'
+      - 'tools/**'
       - '.github/workflows/compilar.yml'
   workflow_dispatch:
+    inputs:
+      incremento:
+        description: 'Qué número de versión subir (1.0.0 → minor = 1.1.0, patch = 1.0.1, major = 2.0.0)'
+        type: choice
+        options: [minor, patch, major]
+        default: minor
 
 permissions:
   contents: write
 
+# Nunca dos publicaciones a la vez: evita que dos ejecuciones calculen la misma versión
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  SDK_VERSION: v0.44
+  MBEDTLS_VERSION: 3.6.4
+  CURL_VERSION: 8.18.0
+  ELF: PS5-AutoupdaterPM.elf
+
 jobs:
   compilar:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
-      - name: Descargar el repositorio
+      - name: Descargar el repositorio (con etiquetas)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Instalar PS5 Payload SDK y librerias (libcurl)
+      - name: Herramientas de compilación
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang lld llvm make cmake ninja-build pkg-config git curl jq unzip zstd libarchive-tools
+          sudo apt-get update -q
+          sudo apt-get install -y -q clang-18 lld-18
+          echo "PS5_PAYLOAD_SDK=$HOME/ps5-payload-sdk" >> "$GITHUB_ENV"
 
-          sudo mkdir -p /opt/ps5-payload-sdk
+      - name: Caché del SDK + mbedTLS + curl
+        id: cache-sdk
+        uses: actions/cache@v4
+        with:
+          path: ~/ps5-payload-sdk
+          key: ps5sdk-${{ env.SDK_VERSION }}-mbedtls-${{ env.MBEDTLS_VERSION }}-curl-${{ env.CURL_VERSION }}-${{ hashFiles('scripts/build_deps.sh') }}
 
-          # 1. Instalar el SDK oficial de PS5
-          SDK_ZIP=$(curl -s https://api.github.com/repos/ps5-payload-dev/sdk/releases/latest | jq -r '.assets[]? | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
-          if [ -n "$SDK_ZIP" ]; then
-            curl -sL "$SDK_ZIP" -o /tmp/sdk.zip
-            sudo unzip -q -o /tmp/sdk.zip -d /opt/ps5-payload-sdk
-            PROSPERO_MK=$(find /opt/ps5-payload-sdk -name "prospero.mk" | head -n 1)
-            if [ -n "$PROSPERO_MK" ] && [ "$PROSPERO_MK" != "/opt/ps5-payload-sdk/toolchain/prospero.mk" ]; then
-              SDK_ROOT=$(dirname $(dirname "$PROSPERO_MK"))
-              sudo cp -rf "$SDK_ROOT"/* /opt/ps5-payload-sdk/
-            fi
-          fi
+      - name: Instalar SDK y compilar dependencias
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        run: bash scripts/build_deps.sh
 
-          if [ ! -f /opt/ps5-payload-sdk/toolchain/prospero.mk ]; then
-            git clone --depth 1 https://github.com/ps5-payload-dev/sdk.git /tmp/ps5-sdk
-            make -C /tmp/ps5-sdk
-            sudo make -C /tmp/ps5-sdk install DESTDIR=/
-          fi
-
-          # 2. Intentar descargar precompilados de pacbrew-repo si existen
-          for repo in pacbrew-repo pacbrew; do
-            PKG_URLS=$(curl -s "https://api.github.com/repos/ps5-payload-dev/$repo/releases" | jq -r '.[0].assets[]?.browser_download_url // empty' | grep -E 'ps5-payload-(zlib|mbedtls|curl)-[0-9]' || true)
-            for u in $PKG_URLS; do
-              curl -sL "$u" | sudo bsdtar -xf - -C / || true
-            done
-          done
-
-          if [ -d /opt/pacbrew/ps5/payload-sdk/target/user ]; then
-            sudo cp -rf /opt/pacbrew/ps5/payload-sdk/target/user/* /opt/ps5-payload-sdk/target/user/ || true
-          fi
-
-          # 3. Si curl.h no estaba precompilado, compilar zlib + mbedtls + libcurl con el SDK de PS5
-          if [ ! -f /opt/ps5-payload-sdk/target/user/include/curl/curl.h ]; then
-            export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
-            export PATH="/opt/ps5-payload-sdk/bin:$PATH"
-            sudo mkdir -p /opt/ps5-payload-sdk/target/user/include /opt/ps5-payload-sdk/target/user/lib
-
-            # Compilar zlib
-            git clone --depth 1 --branch v1.3.1 https://github.com/madler/zlib.git /tmp/zlib
-            mkdir -p /tmp/zlib/build && cd /tmp/zlib/build
-            sudo -E /opt/ps5-payload-sdk/bin/prospero-cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
-            sudo ninja install
-
-            # Compilar mbedtls
-            git clone --depth 1 --branch v3.6.0 https://github.com/Mbed-TLS/mbedtls.git /tmp/mbedtls
-            mkdir -p /tmp/mbedtls/build && cd /tmp/mbedtls/build
-            sudo -E /opt/ps5-payload-sdk/bin/prospero-cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF -DUSE_STATIC_MBEDTLS_LIBRARY=ON
-            sudo ninja install
-
-            # Compilar libcurl (solo HTTP/HTTPS)
-            git clone --depth 1 --branch curl-8_10_1 https://github.com/curl/curl.git /tmp/curl
-            mkdir -p /tmp/curl/build && cd /tmp/curl/build
-            sudo -E /opt/ps5-payload-sdk/bin/prospero-cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release \
-              -DBUILD_SHARED_LIBS=OFF -DBUILD_CURL_EXE=OFF -DBUILD_TESTING=OFF \
-              -DCURL_USE_MBEDTLS=ON -DHTTP_ONLY=ON -DCURL_USE_LIBPSL=OFF \
-              -DCURL_BROTLI=OFF -DCURL_ZSTD=OFF -DUSE_NGHTTP2=OFF -DUSE_LIBIDN2=OFF
-            sudo ninja install
-          fi
-
-      - name: Compilar PS5-AutoupdaterPM.elf
+      - name: Calcular la nueva versión
+        id: version
+        env:
+          INCREMENTO: ${{ inputs.incremento || 'minor' }}
         run: |
-          export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+          ULTIMA=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+          if [ -z "$ULTIMA" ]; then
+            NUEVA="1.0.0"
+          else
+            IFS=. read -r MA MI PA <<< "${ULTIMA#v}"
+            case "$INCREMENTO" in
+              major) MA=$((MA + 1)); MI=0; PA=0 ;;
+              patch) PA=$((PA + 1)) ;;
+              *)     MI=$((MI + 1)); PA=0 ;;
+            esac
+            NUEVA="$MA.$MI.$PA"
+          fi
+          if git rev-parse -q --verify "refs/tags/v$NUEVA" >/dev/null; then
+            echo "::error::La etiqueta v$NUEVA ya existe"; exit 1
+          fi
+          echo "Anterior: ${ULTIMA:-ninguna}  →  Nueva: v$NUEVA"
+          echo "nueva=$NUEVA" >> "$GITHUB_OUTPUT"
+          echo "anterior=$ULTIMA" >> "$GITHUB_OUTPUT"
+
+      - name: Compilar el payload
+        run: |
+          curl -fsSL -o cacert.pem https://curl.se/ca/cacert.pem
           make clean
-          make
+          make VERSION=${{ steps.version.outputs.nueva }}
+          file "$ELF" | tee /dev/stderr | grep -q 'ELF 64-bit' || { echo "::error::No es un ELF"; exit 1; }
+          sha256sum "$ELF" | tee "$ELF.sha256"
 
-      - name: Guardar el ELF en el repositorio y actualizar Release
+      - name: Guardar el ELF como artefacto de la ejecución
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS5-AutoupdaterPM-v${{ steps.version.outputs.nueva }}
+          path: ${{ env.ELF }}
+          if-no-files-found: error
+
+      - name: Publicar la release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUEVA: ${{ steps.version.outputs.nueva }}
+          ANTERIOR: ${{ steps.version.outputs.anterior }}
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add *.elf
-          if ! git diff --cached --quiet; then
-            git commit -m "Auto-compilado PS5-AutoupdaterPM.elf"
-            git push
-          else
-            echo "El archivo ELF en la rama principal no ha cambiado."
-          fi
-
-          if gh release view v1.0.0 >/dev/null 2>&1; then
-            gh release upload v1.0.0 PS5-AutoupdaterPM.elf --clobber
-          else
-            gh release create v1.0.0 PS5-AutoupdaterPM.elf --title "v1.0.0" --notes "Compilacion automatica de PS5-AutoupdaterPM.elf"
-          fi
+          SHA=$(cut -d' ' -f1 "$ELF.sha256")
+          {
+            echo "Payload que descarga e instala la última versión de PS5 Payload Manager en \`/data/ps5_autoloader\`."
+            echo
+            echo "**SHA-256:** \`$SHA\`"
+            echo
+            if [ -n "$ANTERIOR" ]; then
+              echo "### Cambios desde $ANTERIOR"
+              git log --no-merges --pretty='- %s' "$ANTERIOR..HEAD"
+            else
+              echo "Primera versión."
+            fi
+          } > notas.md
+          gh release create "v$NUEVA" "$ELF" \
+            --target "$GITHUB_SHA" \
+            --title "v$NUEVA" \
+            --notes-file notas.md \
+            --latest
