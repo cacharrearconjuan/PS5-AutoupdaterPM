@@ -7,6 +7,7 @@ on:
       - '**.c'
       - '**.h'
       - 'Makefile'
+      - 'app/**'
       - 'scripts/**'
       - 'tools/**'
       - '.github/workflows/compilar.yml'
@@ -106,7 +107,7 @@ jobs:
         run: |
           SHA=$(cut -d' ' -f1 "$ELF.sha256")
           {
-            echo "Payload que descarga e instala la última versión de PS5 Payload Manager en \`/data/ps5_autoloader\`."
+            echo "Payload que descarga e instala la última versión de PS5 Payload Manager en \`/data/ps5_autoloader\` (con su \`autoload.txt\`), guarda su propia copia en \`/data/pldmgr\` e instala la app «Actualizar Payload Manager» en la pantalla de inicio para relanzarlo con un botón."
             echo
             echo "**SHA-256:** \`$SHA\`"
             echo

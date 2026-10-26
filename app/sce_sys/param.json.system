@@ -1,0 +1,13 @@
+{
+    "applicationCategoryType": 33554432,
+    "localizedParameters": {
+        "defaultLanguage": "en-US",
+        "en-US": {
+            "titleName": "Actualizar Payload Manager"
+        },
+        "es-ES": {
+            "titleName": "Actualizar Payload Manager"
+        }
+    },
+    "titleId": "AUPM00002"
+}
