@@ -1,15 +1,41 @@
 # PS5-AutoupdaterPM
 
-Payload para PS5 que descarga la última versión de **[PS5 Payload Manager](https://github.com/itsPLK/ps5-payload-manager)** y la deja instalada en `/data/ps5_autoloader` para que el autoloader la cargue en cada arranque.
+Payload para PS5 que descarga la última versión de **[PS5 Payload Manager](https://github.com/itsPLK/ps5-payload-manager)** y la deja instalada en `/data/ps5_autoloader`, para que el autoloader la cargue en el siguiente arranque. Además instala en la pantalla de inicio la app **«Actualizar Payload Manager»**, que repite la actualización con un botón.
 
 ## Qué hace
 
-1. Lee el repositorio de payloads [`payloads.json`](https://cacharrearconjuan.github.io/mis-payloads-ps5/payloads.json) y busca la entrada con `"id": "pldmgr"`.
-2. Si el `pldmgr.elf` instalado ya tiene el mismo SHA-256 que el `checksum` del JSON, no descarga nada: avisa de que está al día.
-3. Si hay versión nueva, la descarga a un fichero temporal, comprueba que es un ELF y que su **SHA-256 coincide** con el `checksum`, y solo entonces sustituye el `pldmgr.elf` anterior. Si algo falla, la versión anterior se queda intacta.
-4. Se asegura de que `pldmgr.elf` está en `autoload.txt`:
-   - si no existe, lo crea con `!3000` + `pldmgr.elf`;
-   - si existe, **respeta lo que haya** (elfldr, etaHEN…) y solo añade `pldmgr.elf` al final si falta.
+Cada vez que se ejecuta, ya sea desde Payload Manager o desde el icono:
+
+0. **DNS local primero.** Si en `/data/pldmgr` (o sus subcarpetas, donde Payload Manager guarda lo que instala del repositorio) hay un **pepedns** o un **nanoDNS** y no hay ningún DNS respondiendo en `127.0.0.1:53`, lo lanza por elfldr y espera hasta 20 segundos a que responda. Con el DNS de la consola en `127.0.0.1`, sin él no hay internet. Si hay los dos, prefiere pepedns; si hay varias versiones, la más reciente.
+1. Crea `/data/ps5_autoloader` si no existe.
+2. Lee el repositorio de payloads [`payloads.json`](https://cacharrearconjuan.github.io/mis-payloads-ps5/payloads.json) y busca la entrada con `"id": "pldmgr"`.
+3. Si el `pldmgr.elf` instalado ya tiene el mismo SHA-256 que el `checksum` del JSON, no descarga nada: avisa de que está al día.
+4. Si hay versión nueva, la descarga a un fichero temporal, comprueba que es un ELF y que su **SHA-256 coincide** con el `checksum`, y solo entonces la renombra a `pldmgr.elf`. Si algo falla, la versión anterior se queda intacta.
+5. Se asegura de que `pldmgr.elf` está en `autoload.txt`:
+   - si no existe, lo crea con `!3000` y `pldmgr.elf`;
+   - si existe, **respeta lo que haya** (elfldr, kstuff…) y solo añade `pldmgr.elf` al final si falta.
+6. Se asegura de que `/data/pldmgr/PS5-AutoupdaterPM.elf` (la copia que lanza el icono) existe y es la versión del repositorio (entrada `ps5-autoupdaterpm`). Si falta o su SHA-256 es distinto, la descarga, la verifica y la sustituye.
+7. Instala la app del icono, o la actualiza si ha cambiado.
+
+**No arranca solo.** Si una versión anterior se había añadido a `autoload.txt`, quita esa línea y borra su copia de `/data/ps5_autoloader`. También quita el icono antiguo `AUPM00001`, el que abría el navegador.
+
+## El icono «Actualizar Payload Manager»
+
+Es una app de verdad (`AUPM00002`), instalada con el mismo método que el ejemplo [`install_app`](https://github.com/ps5-payload-dev/sdk/tree/master/samples/install_app) del PS5 Payload SDK: el `eboot.bin` va en `/system_ex/app/AUPM00002` y el `param.json` y el icono en `/user/app/AUPM00002/sce_sys`. No hace falta instalar ninguna PKG: lo hace el payload la primera vez.
+
+Una app no tiene permisos para escribir en `/data`, así que el icono no actualiza nada por sí mismo:
+
+1. Al abrirlo, el `eboot.bin` manda a elfldr (`127.0.0.1:9021`) un pequeño lanzador que lleva dentro y se cierra.
+2. elfldr ejecuta el lanzador con permisos completos.
+3. El lanzador manda a elfldr `/data/pldmgr/PS5-AutoupdaterPM.elf`, que hace todos los pasos de arriba y muestra el resultado en notificaciones.
+
+Requisitos para que el icono funcione:
+
+- **elfldr escuchando en el puerto 9021.** Si usas Payload Manager, ya lo tienes.
+- **Soporte de fself cargado (kstuff o etaHEN)** en ese arranque: el `eboot.bin` está firmado en falso, como el de cualquier homebrew.
+- Si `/data/pldmgr/PS5-AutoupdaterPM.elf` no existe, el lanzador lo avisa: ejecuta el payload una vez desde Payload Manager.
+
+> Si borras el icono desde la pantalla de inicio, vuelve a instalarse la próxima vez que ejecutes el payload desde Payload Manager.
 
 Las descargas van por HTTPS con verificación de certificado (se embebe el bundle de CAs de curl en el ELF). Si la consola tiene la fecha muy desajustada, la verificación falla y el payload lo avisa.
 
@@ -17,13 +43,24 @@ Las descargas van por HTTPS con verificación de certificado (se embebe el bundl
 
 ## Uso
 
-Envía `PS5-AutoupdaterPM.elf` a la PS5 con tu método habitual (elfldr en el puerto 9021, Payload Manager, etc.). Verás notificaciones en pantalla con el resultado.
+Ejecuta `PS5-AutoupdaterPM.elf` **una vez** desde Payload Manager (o mándalo a elfldr en el puerto 9021). Verás notificaciones con el resultado y aparecerá el icono «Actualizar Payload Manager» en la pantalla de inicio. A partir de ahí, cuando quieras actualizar, pulsa el icono. La versión nueva de Payload Manager se carga en el siguiente arranque.
 
 Descarga: [Releases](https://github.com/cacharrearconjuan/PS5-AutoupdaterPM/releases/latest).
 
+## Estructura
+
+| Ruta | Qué es |
+|---|---|
+| `main.c` | El actualizador (`PS5-AutoupdaterPM.elf`) |
+| `app/eboot.c` | `eboot.bin` de la app del icono: manda el lanzador a elfldr |
+| `app/lanzador.c` | Lanzador: manda `/data/pldmgr/PS5-AutoupdaterPM.elf` a elfldr |
+| `app/sce_sys/` | `param.json`, `param.json.system` e `icon0.png` de la app |
+
+El `Makefile` compila el lanzador, lo mete dentro del `eboot`, firma el `eboot` con `make_fself.py` del SDK y mete todo dentro del actualizador. Solo se publica un fichero: `PS5-AutoupdaterPM.elf`.
+
 ## Compilación automática (GitHub Actions)
 
-Cada push a `main` que toque el código (`*.c`, `*.h`, `Makefile`, `scripts/`, `tools/` o el workflow) compila el ELF y publica una **release nueva** subiendo la versión menor:
+Cada push a `main` que toque el código (`*.c`, `*.h`, `Makefile`, `app/`, `scripts/`, `tools/` o el workflow) compila el ELF y publica una **release nueva** subiendo la versión menor:
 
 `v1.0.0` → `v1.1.0` → `v1.2.0` …
 
@@ -50,4 +87,4 @@ make VERSION=1.0.0
 ## Créditos
 
 - [itsPLK](https://github.com/itsPLK) por PS5 Payload Manager.
-- [John Törnblom](https://github.com/john-tornblom) y colaboradores del [PS5 Payload SDK](https://github.com/ps5-payload-dev/sdk).
+- [John Törnblom](https://github.com/john-tornblom) y colaboradores del [PS5 Payload SDK](https://github.com/ps5-payload-dev/sdk). El `eboot` y la instalación de la app se basan en su ejemplo `install_app` (GPLv3).
