@@ -3,9 +3,12 @@
  *
  * La app del icono (eboot.bin) no tiene permisos para tocar /data, así que lo
  * único que hace es mandar este ELF a elfldr (127.0.0.1:9021). elfldr lo ejecuta
- * con permisos completos y este, a su vez, manda a elfldr el actualizador que
- * hay guardado en /data/pldmgr. Es el mismo método que usa Payload Manager para
- * lanzar payloads.
+ * con permisos completos y este, a su vez, manda a elfldr el actualizador. Es
+ * el mismo método que usa Payload Manager para lanzar payloads.
+ *
+ * Qué copia lanza: la que gestiona Payload Manager (instalada desde el
+ * repositorio, en /data/pldmgr/payloads/repo/...) o, si no hay, la de
+ * /data/pldmgr/PS5-AutoupdaterPM.elf.
  */
 #include <arpa/inet.h>
 #include <errno.h>
@@ -18,6 +21,8 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#include "pm_slots.h"
 
 #ifndef UPDATER_PATH
 #define UPDATER_PATH "/data/pldmgr/PS5-AutoupdaterPM.elf"
@@ -67,20 +72,28 @@ static int connect_elfldr(void) {
 
 int main(void) {
     static char buf[64 * 1024];
+    static pm_slot_t slots[PM_MAX_SLOTS];
+    const char *path = NULL;
     struct stat st;
     size_t total = 0;
     int fd, s, err = 0;
 
     signal(SIGPIPE, SIG_IGN);
 
-    if (stat(UPDATER_PATH, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size == 0) {
-        notify("No encuentro " UPDATER_PATH ".\n"
-               "Ejecuta PS5-AutoupdaterPM una vez desde Payload Manager.");
+    int n = pm_find_self_slots(slots, PM_MAX_SLOTS);
+    for (int i = 0; i < n && !path; i++)
+        if (stat(slots[i].payload, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0)
+            path = slots[i].payload;
+    if (!path && stat(UPDATER_PATH, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0)
+        path = UPDATER_PATH;
+    if (!path) {
+        notify("No encuentro PS5-AutoupdaterPM en Payload Manager ni en " UPDATER_PATH ".\n"
+               "Ejecútalo una vez desde Payload Manager.");
         return -1;
     }
 
-    if ((fd = open(UPDATER_PATH, O_RDONLY)) < 0) {
-        notify("No se puede leer " UPDATER_PATH " (errno %d)", errno);
+    if ((fd = open(path, O_RDONLY)) < 0) {
+        notify("No se puede leer %s (errno %d)", path, errno);
         return -1;
     }
 
@@ -115,7 +128,7 @@ int main(void) {
     close(fd);
 
     if (err || total != (size_t)st.st_size) {
-        notify("Error al mandar " UPDATER_PATH " a elfldr");
+        notify("Error al mandar %s a elfldr", path);
         return -1;
     }
     return 0;

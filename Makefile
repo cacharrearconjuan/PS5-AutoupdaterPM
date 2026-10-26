@@ -55,7 +55,7 @@ $(CA_PEM):
 # --- App del icono ---------------------------------------------------------
 
 # 1. Lanzador: payload normal que manda UPDATER_PATH a elfldr
-lanzador.elf: app/lanzador.c
+lanzador.elf: app/lanzador.c app/pm_slots.h
 	$(CC) -Os -Wall -Werror -DUPDATER_PATH=\"$(UPDATER_PATH)\" -o $@ $<
 	$(STRIP) $@
 
@@ -93,7 +93,7 @@ icon0_png.h: app/sce_sys/icon0.png tools/bin2h.py
 cacert_pem.h: $(CA_PEM) tools/bin2h.py
 	python3 tools/bin2h.py $< $@ cacert_pem
 
-main.o: main.c $(HEADERS) .version
+main.o: main.c app/pm_slots.h $(HEADERS) .version
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(ELF): $(OBJS)

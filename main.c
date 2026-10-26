@@ -8,9 +8,11 @@
  *    SHA-256 y la deja ahí como pldmgr.elf. Crea autoload.txt si no existe o
  *    añade pldmgr.elf si falta, sin tocar el resto. En el siguiente arranque el
  *    autoloader carga la versión nueva.
- * 2. Se asegura de que /data/pldmgr/PS5-AutoupdaterPM.elf existe y es la
- *    versión del repositorio (mismo SHA-256); si falta o es distinta, la
- *    descarga y la sustituye. Es la copia que lanza el icono.
+ * 2. Pone al día su propia copia con la versión del repositorio (mismo
+ *    SHA-256; si falta o es distinta, la descarga y la sustituye). Si está
+ *    instalado desde Payload Manager, actualiza esa copia y su meta.json, para
+ *    que Payload Manager enseñe la versión nueva y no haya duplicados. Si no,
+ *    usa /data/pldmgr/PS5-AutoupdaterPM.elf. Es la copia que lanza el icono.
  * 3. Instala (o actualiza) la app «Actualizar Payload Manager» en la pantalla
  *    de inicio. Al abrirla, manda un pequeño lanzador a elfldr (puerto 9021)
  *    que ejecuta /data/pldmgr/PS5-AutoupdaterPM.elf.
@@ -49,6 +51,9 @@
 #include "app_param_json.h"
 #include "app_param_system_json.h"
 #include "icon0_png.h"
+
+/* Slots de Payload Manager (compartido con el lanzador del icono) */
+#include "app/pm_slots.h"
 
 #ifndef APP_VERSION
 #define APP_VERSION "dev"
@@ -889,6 +894,129 @@ static void ensure_local_dns(void) {
 }
 
 /* ------------------------------------------------------------------------ */
+/* Copia propia: la de Payload Manager (slot) o /data/pldmgr                  */
+/* ------------------------------------------------------------------------ */
+
+/* Escapa una cadena para meta.json */
+static void json_escape_into(char *out, size_t outsz, const char *in) {
+    size_t n = 0;
+    for (; *in && n + 7 < outsz; in++) {
+        unsigned char c = (unsigned char)*in;
+        if (c == '"' || c == '\\') {
+            out[n++] = '\\';
+            out[n++] = (char)c;
+        } else if (c < 0x20) {
+            n += (size_t)snprintf(out + n, outsz - n, "\\u%04x", c);
+        } else {
+            out[n++] = (char)c;
+        }
+    }
+    out[n] = '\0';
+}
+
+/* Cambia en *meta el valor (cadena) de key por val (ya escapado).
+ * Devuelve 1 si ha cambiado, 0 si ya era igual o no existe, -1 si hay error. */
+static int meta_set(char **meta, size_t *len, const char *key, const char *val) {
+    const char *vs, *ve;
+    size_t vlen = strlen(val);
+
+    if (pm_json_find(*meta, *len, key, &vs, &ve) != 0) return 0;
+    if ((size_t)(ve - vs) == vlen && memcmp(vs, val, vlen) == 0) return 0;
+
+    size_t pre = (size_t)(vs - *meta), post = *len - (size_t)(ve - *meta);
+    char *nb = malloc(pre + vlen + post + 1);
+    if (!nb) return -1;
+    memcpy(nb, *meta, pre);
+    memcpy(nb + pre, val, vlen);
+    memcpy(nb + pre + vlen, ve, post);
+    nb[pre + vlen + post] = '\0';
+    free(*meta);
+    *meta = nb;
+    *len = pre + vlen + post;
+    return 1;
+}
+
+/* Pone en el meta.json del slot la versión, checksum y URLs del repositorio,
+ * para que Payload Manager enseñe la versión que hay de verdad.
+ * Devuelve 1 si lo ha cambiado, 0 si ya estaba, -1 si hay error. */
+static int update_slot_meta(const pm_slot_t *slot, const char *json) {
+    static const char *const fields[] = { "version", "checksum", "url", "source_direct", "last_update", NULL };
+    const char *obj, *obj_end;
+    char raw[FIELD_SIZE], esc[FIELD_SIZE * 6 + 1], tmp[640];
+    size_t len = 0;
+    int changed = 0;
+
+    if (find_object_by_id(json, strlen(json), SELF_ID, &obj, &obj_end) != 0) return -1;
+
+    char *meta = pm_read_text(slot->meta, &len);
+    if (!meta) return file_exists(slot->meta) ? -1 : 0; /* sin meta.json no hay nada que tocar */
+
+    for (int i = 0; fields[i]; i++) {
+        if (get_string_field(obj, obj_end, fields[i], raw, sizeof(raw)) != 0 || !raw[0]) continue;
+        json_escape_into(esc, sizeof(esc), raw);
+        int r = meta_set(&meta, &len, fields[i], esc);
+        if (r < 0) {
+            free(meta);
+            return -1;
+        }
+        changed |= r;
+    }
+
+    if (changed) {
+        /* Igual que Payload Manager: fichero temporal oculto y rename */
+        snprintf(tmp, sizeof(tmp), "%s/.meta-aupm", slot->dir);
+        FILE *fp = fopen(tmp, "wb");
+        int ok = fp && fwrite(meta, 1, len, fp) == len;
+        if (fp && fclose(fp) != 0) ok = 0;
+        if (!ok || rename(tmp, slot->meta) != 0) {
+            unlink(tmp);
+            free(meta);
+            return -1;
+        }
+    }
+    free(meta);
+    return changed;
+}
+
+static void update_self_copies(const char *json) {
+    static pm_slot_t slots[PM_MAX_SLOTS];
+    char version[64] = "";
+    int n = pm_find_self_slots(slots, PM_MAX_SLOTS), ok = 0;
+
+    /* a) Instalado desde Payload Manager: se actualiza esa copia */
+    for (int i = 0; i < n; i++) {
+        int rs = install_from_repo(json, SELF_ID, slots[i].payload, APP_NAME, version, sizeof(version));
+        if (rs == UPD_ERROR) continue;
+        int m = update_slot_meta(&slots[i], json);
+        if (m < 0)
+            notify("Aviso: no se pudo actualizar el meta.json de " APP_NAME " en Payload Manager");
+        if (rs == UPD_INSTALLED || m > 0)
+            notify(APP_NAME " %s actualizado en Payload Manager", version);
+        ok = 1;
+    }
+
+    if (n > 0) {
+        /* La copia suelta de /data/pldmgr (la creaba la v2.0.0) sobra */
+        if (ok && file_exists(UPDATER_PATH) && unlink(UPDATER_PATH) == 0)
+            notify("Quitada la copia duplicada " UPDATER_PATH);
+        return;
+    }
+
+    /* b) No está en Payload Manager: copia en /data/pldmgr */
+    int existed = file_exists(UPDATER_PATH);
+    if (mkdir_p(UPDATER_DIR) != 0) {
+        notify("Error: no se pudo crear " UPDATER_DIR);
+    } else {
+        int rs = install_from_repo(json, SELF_ID, UPDATER_PATH, APP_NAME, version, sizeof(version));
+        if (rs == UPD_INSTALLED)
+            notify(existed ? APP_NAME " %s actualizado en " UPDATER_DIR
+                           : APP_NAME " %s copiado en " UPDATER_DIR, version);
+    }
+    if (!file_exists(UPDATER_PATH))
+        notify("Aviso: falta " UPDATER_PATH ". El icono no funcionará hasta que se pueda descargar.");
+}
+
+/* ------------------------------------------------------------------------ */
 /* La actualización completa                                                 */
 /* ------------------------------------------------------------------------ */
 
@@ -896,7 +1024,7 @@ static int run_update(void) {
     static const char *const entries[] = { PLDMGR_FILE, NULL };
     char version[64];
     char *json;
-    int r, rs, self_existed;
+    int r;
 
     g_cert_error = 0;
 
@@ -926,18 +1054,8 @@ static int run_update(void) {
     if (file_exists(AUTOLOAD_DIR "/" PLDMGR_FILE) && ensure_autoload_entries(entries) < 0)
         notify("Aviso: no se pudo actualizar " AUTOLOAD_TXT);
 
-    /* 2. Copia del actualizador en /data/pldmgr (la que lanza el icono) */
-    self_existed = file_exists(UPDATER_PATH);
-    if (mkdir_p(UPDATER_DIR) != 0) {
-        notify("Error: no se pudo crear " UPDATER_DIR);
-    } else {
-        rs = install_from_repo(json, SELF_ID, UPDATER_PATH, APP_NAME, version, sizeof(version));
-        if (rs == UPD_INSTALLED)
-            notify(self_existed ? APP_NAME " %s actualizado en " UPDATER_DIR
-                                : APP_NAME " %s copiado en " UPDATER_DIR, version);
-    }
-    if (!file_exists(UPDATER_PATH))
-        notify("Aviso: falta " UPDATER_PATH ". El icono no funcionará hasta que se pueda descargar.");
+    /* 2. Copia propia al día (la que lanza el icono) */
+    update_self_copies(json);
 
     free(json);
     return r == UPD_ERROR ? -1 : 0;

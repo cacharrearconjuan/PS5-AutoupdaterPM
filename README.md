@@ -14,7 +14,9 @@ Cada vez que se ejecuta, ya sea desde Payload Manager o desde el icono:
 5. Se asegura de que `pldmgr.elf` está en `autoload.txt`:
    - si no existe, lo crea con `!3000` y `pldmgr.elf`;
    - si existe, **respeta lo que haya** (elfldr, kstuff…) y solo añade `pldmgr.elf` al final si falta.
-6. Se asegura de que `/data/pldmgr/PS5-AutoupdaterPM.elf` (la copia que lanza el icono) existe y es la versión del repositorio (entrada `ps5-autoupdaterpm`). Si falta o su SHA-256 es distinto, la descarga, la verifica y la sustituye.
+6. Pone al día su propia copia, la que lanza el icono, con la versión del repositorio (entrada `ps5-autoupdaterpm`). Si falta o su SHA-256 es distinto, la descarga, la verifica y la sustituye:
+   - **Si lo instalaste desde Payload Manager**, actualiza esa copia (`/data/pldmgr/payloads/repo/ps5-autoupdaterpm@…/`) y su `meta.json` (versión, checksum, URLs y fecha), para que Payload Manager enseñe la versión nueva. Si queda una copia suelta en `/data/pldmgr/PS5-AutoupdaterPM.elf` (la creaba la v2.0.0), la borra para que no haya duplicados.
+   - Si no, usa `/data/pldmgr/PS5-AutoupdaterPM.elf`.
 7. Instala la app del icono, o la actualiza si ha cambiado.
 
 **No arranca solo.** Si una versión anterior se había añadido a `autoload.txt`, quita esa línea y borra su copia de `/data/ps5_autoloader`. También quita el icono antiguo `AUPM00001`, el que abría el navegador.
@@ -27,13 +29,13 @@ Una app no tiene permisos para escribir en `/data`, así que el icono no actuali
 
 1. Al abrirlo, el `eboot.bin` manda a elfldr (`127.0.0.1:9021`) un pequeño lanzador que lleva dentro y se cierra.
 2. elfldr ejecuta el lanzador con permisos completos.
-3. El lanzador manda a elfldr `/data/pldmgr/PS5-AutoupdaterPM.elf`, que hace todos los pasos de arriba y muestra el resultado en notificaciones.
+3. El lanzador manda a elfldr la copia de Payload Manager (o, si no hay, `/data/pldmgr/PS5-AutoupdaterPM.elf`), que hace todos los pasos de arriba y muestra el resultado en notificaciones.
 
 Requisitos para que el icono funcione:
 
 - **elfldr escuchando en el puerto 9021.** Si usas Payload Manager, ya lo tienes.
 - **Soporte de fself cargado (kstuff o etaHEN)** en ese arranque: el `eboot.bin` está firmado en falso, como el de cualquier homebrew.
-- Si `/data/pldmgr/PS5-AutoupdaterPM.elf` no existe, el lanzador lo avisa: ejecuta el payload una vez desde Payload Manager.
+- Si no encuentra ninguna copia, el lanzador lo avisa: ejecuta el payload una vez desde Payload Manager.
 
 > Si borras el icono desde la pantalla de inicio, vuelve a instalarse la próxima vez que ejecutes el payload desde Payload Manager.
 
@@ -53,7 +55,8 @@ Descarga: [Releases](https://github.com/cacharrearconjuan/PS5-AutoupdaterPM/rele
 |---|---|
 | `main.c` | El actualizador (`PS5-AutoupdaterPM.elf`) |
 | `app/eboot.c` | `eboot.bin` de la app del icono: manda el lanzador a elfldr |
-| `app/lanzador.c` | Lanzador: manda `/data/pldmgr/PS5-AutoupdaterPM.elf` a elfldr |
+| `app/lanzador.c` | Lanzador: manda a elfldr la copia de PS5-AutoupdaterPM |
+| `app/pm_slots.h` | Localiza la copia que gestiona Payload Manager (lo usan el actualizador y el lanzador) |
 | `app/sce_sys/` | `param.json`, `param.json.system` e `icon0.png` de la app |
 
 El `Makefile` compila el lanzador, lo mete dentro del `eboot`, firma el `eboot` con `make_fself.py` del SDK y mete todo dentro del actualizador. Solo se publica un fichero: `PS5-AutoupdaterPM.elf`.
