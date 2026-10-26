@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       incremento:
-        description: 'Qué número de versión subir (1.0.0 → minor = 1.1.0, patch = 1.0.1, major = 2.0.0)'
+        description: 'Qué número de versión subir (2.0.0 → minor = 2.0.1, patch = 2.1.0, major = 3.0.0)'
         type: choice
         options: [minor, patch, major]
         default: minor
@@ -71,8 +71,8 @@ jobs:
             IFS=. read -r MA MI PA <<< "${ULTIMA#v}"
             case "$INCREMENTO" in
               major) MA=$((MA + 1)); MI=0; PA=0 ;;
-              patch) PA=$((PA + 1)) ;;
-              *)     MI=$((MI + 1)); PA=0 ;;
+              patch) MI=$((MI + 1)); PA=0 ;;
+              *)     PA=$((PA + 1)) ;;
             esac
             NUEVA="$MA.$MI.$PA"
           fi
@@ -106,7 +106,7 @@ jobs:
         run: |
           SHA=$(cut -d' ' -f1 "$ELF.sha256")
           {
-            echo "Payload que descarga e instala la última versión de PS5 Payload Manager en \`/data/ps5_autoloader\`."
+            echo "Payload que descarga e instala la última versión de PS5 Payload Manager en \`/data/ps5_autoloader\` (con su \`autoload.txt\`), y mantiene al día su propia copia en Payload Manager."
             echo
             echo "**SHA-256:** \`$SHA\`"
             echo
