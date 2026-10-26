@@ -44,6 +44,7 @@
 
 #include <curl/curl.h>
 #include <mbedtls/sha256.h>
+#include <ps5/kernel.h>
 
 /* Generados por el Makefile con tools/bin2h.py */
 #include "cacert_pem.h"
@@ -644,8 +645,26 @@ static void remove_legacy_autostart(void) {
 
 int sceAppInstUtilInitialize(void);
 int sceAppInstUtilTerminate(void);
-int sceAppInstUtilAppInstallTitleDir(const char *title_id, const char *dir, void *unused);
 int sceAppInstUtilAppUnInstall(const char *title_id);
+
+/* El stub enlazado de sceAppInstUtilAppInstallTitleDir no instala de verdad
+ * (todos los stubs de libSceAppInstUtil van a la misma entrada). Igual que
+ * Payload Manager, se resuelve la función real en tiempo de ejecución por su
+ * NID. Sin esto, se crean las carpetas pero el icono no aparece. */
+typedef int (*appinst_install_dir_t)(const char *title_id, const char *dir, void *unused);
+
+typedef int (*appinst_uninstall_t)(const char *title_id);
+
+static void *resolve_appinst(const char *nid) {
+    uint32_t handle;
+    if (kernel_dynlib_handle(-1, "libSceAppInstUtil.sprx", &handle) != 0)
+        return NULL;
+    return (void *)kernel_dynlib_resolve(-1, handle, nid);
+}
+
+static appinst_install_dir_t resolve_install_title_dir(void) {
+    return (appinst_install_dir_t)resolve_appinst("Wudg3Xe3heE");
+}
 
 #define IOVEC_SIZE(x)  (sizeof(x) / sizeof(struct iovec))
 #define IOVEC_ENTRY(x) { (void *)(x), (x) ? strlen(x) + 1 : 0 }
@@ -690,6 +709,11 @@ static int install_app(void) {
     }
 
     if (!registered || p || i) {
+        appinst_install_dir_t install_dir = resolve_install_title_dir();
+        if (!install_dir) {
+            notify("Error al instalar el icono: no se pudo resolver sceAppInstUtilAppInstallTitleDir");
+            return -1;
+        }
         unlink(APP_MARKER);
         /* Como en el ejemplo del SDK: al instalar no debe estar el de sistema */
         unlink(SYS_APP_DIR "/sce_sys/param.json");
@@ -697,7 +721,7 @@ static int install_app(void) {
             notify("Error al instalar el icono: sceAppInstUtilInitialize 0x%08X", err);
             return -1;
         }
-        err = sceAppInstUtilAppInstallTitleDir(TITLE_ID, "/user/app/", 0);
+        err = install_dir(TITLE_ID, "/user/app/", 0);
         sceAppInstUtilTerminate();
         if (err != 0) {
             notify("Error al instalar el icono: sceAppInstUtilAppInstallTitleDir 0x%08X", err);
@@ -733,8 +757,10 @@ static void remove_old_shortcut(void) {
     int err;
 
     if (stat("/user/app/" OLD_TITLE_ID, &st) != 0) return;
+    appinst_uninstall_t uninstall = (appinst_uninstall_t)resolve_appinst("U0R69uEHte4");
+    if (!uninstall) uninstall = sceAppInstUtilAppUnInstall;
     if (sceAppInstUtilInitialize() != 0) return;
-    err = sceAppInstUtilAppUnInstall(OLD_TITLE_ID);
+    err = uninstall(OLD_TITLE_ID);
     sceAppInstUtilTerminate();
     if (err == 0 && stat("/user/app/" OLD_TITLE_ID, &st) != 0)
         notify("Quitado el icono antiguo (" OLD_TITLE_ID ")");
