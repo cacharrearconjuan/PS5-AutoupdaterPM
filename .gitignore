@@ -3,5 +3,11 @@
 *.sha256
 cacert.pem
 cacert_pem.h
+app_param_json.h
+app_param_system_json.h
+eboot_bin.h
+lanzador_elf.h
+eboot.bin
+icon0_png.h
 .version
 notas.md
