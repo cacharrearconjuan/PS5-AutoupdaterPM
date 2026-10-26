@@ -158,6 +158,8 @@ static size_t write_file_cb(char *ptr, size_t size, size_t nmemb, void *ud) {
 }
 
 static int g_cert_error;
+static CURLcode g_curl_res;   /* último error de curl, para explicar el fallo */
+static long g_http_status;
 
 static int http_get(const char *url, curl_write_callback cb, void *ud, long timeout_s) {
     CURL *curl = curl_easy_init();
@@ -191,6 +193,8 @@ static int http_get(const char *url, curl_write_callback cb, void *ud, long time
     if (res == CURLE_OK)
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
     curl_easy_cleanup(curl);
+    g_curl_res = res;
+    g_http_status = status;
 
     if (res != CURLE_OK) {
         printf("[" APP_NAME "] curl: %s (%s)\n", curl_easy_strerror(res), url);
@@ -721,7 +725,7 @@ static int install_app(void) {
     }
 
     if (!registered)
-        notify("Icono «Actualizar Payload Manager» instalado en la pantalla de inicio");
+        notify("Icono «Actualizar Payload Manager» enviado a instalar (" TITLE_ID ")");
     else if (e || p || i || s)
         notify("App «Actualizar Payload Manager» actualizada");
     return 0;
@@ -868,29 +872,61 @@ static int send_to_elfldr(const char *path) {
     return err ? -1 : 0;
 }
 
-static void ensure_local_dns(void) {
+enum { DNS_NONE = 0, DNS_RUNNING = 1, DNS_FAILED = -1 };
+
+/* Devuelve DNS_RUNNING si hay un DNS respondiendo en 127.0.0.1:53 (ya estaba
+ * o lo ha arrancado), DNS_NONE si no hay pepedns/nanoDNS en la consola, o
+ * DNS_FAILED si lo ha intentado arrancar y no responde. */
+static int ensure_local_dns(void) {
     char path[768] = "";
     int rank = 0;
     time_t mtime = 0;
 
+    if (local_dns_answers(1500)) return DNS_RUNNING;  /* ya está en marcha */
+
     find_dns_payload(UPDATER_DIR, 4, path, sizeof(path), &rank, &mtime);
-    if (!rank) return;                    /* no hay pepedns ni nanoDNS */
-    if (local_dns_answers(1500)) return;  /* ya está en marcha */
+    find_dns_payload(AUTOLOAD_DIR, 1, path, sizeof(path), &rank, &mtime);
+    if (!rank) return DNS_NONE;           /* no hay pepedns ni nanoDNS */
 
     const char *name = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
     notify("Arrancando %s para tener internet...", name);
     if (send_to_elfldr(path) != 0) {
         notify("No se pudo arrancar %s: elfldr no responde en el puerto %d", name, ELFLDR_PORT);
-        return;
+        return DNS_FAILED;
     }
     for (int i = 0; i < 20; i++) {
         if (local_dns_answers(500)) {
             notify("%s en marcha", name);
-            return;
+            return DNS_RUNNING;
         }
         usleep(500 * 1000);
     }
     notify("Aviso: %s no responde todavía; sigo igualmente", name);
+    return DNS_FAILED;
+}
+
+/* Explica por qué no se ha podido descargar payloads.json */
+static void explain_repo_error(int dns) {
+    if (g_cert_error) {
+        notify("Error de certificado HTTPS. ¿Está bien la fecha y hora de la consola?");
+    } else if (g_curl_res == CURLE_COULDNT_RESOLVE_HOST) {
+        if (dns == DNS_NONE)
+            notify("Error al descargar payloads.json: no hay DNS.\n"
+                   "No encuentro pepedns ni nanoDNS en /data/pldmgr ni en " AUTOLOAD_DIR ". "
+                   "Si el DNS de la consola es 127.0.0.1, cárgalo antes o cambia el DNS.");
+        else if (dns == DNS_FAILED)
+            notify("Error al descargar payloads.json: el DNS local no responde.");
+        else
+            notify("Error al descargar payloads.json: el DNS no encuentra el servidor "
+                   "(¿lo bloquea tu DNS?).");
+    } else if (g_curl_res == CURLE_COULDNT_CONNECT || g_curl_res == CURLE_OPERATION_TIMEDOUT) {
+        notify("Error al descargar payloads.json: sin conexión a internet (%s)",
+               curl_easy_strerror(g_curl_res));
+    } else if (g_curl_res == CURLE_OK && g_http_status != 200) {
+        notify("Error al descargar payloads.json: el servidor respondió HTTP %ld", g_http_status);
+    } else {
+        notify("Error al descargar payloads.json: %s", curl_easy_strerror(g_curl_res));
+    }
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1035,12 +1071,11 @@ static int run_update(void) {
     }
 
     remove_legacy_autostart(); /* no necesita red */
-    ensure_local_dns();        /* pepedns/nanoDNS primero, para tener internet */
+    int dns = ensure_local_dns(); /* pepedns/nanoDNS primero, para tener internet */
 
     json = download_to_string(REPO_JSON_URL);
     if (!json) {
-        notify(g_cert_error ? "Error de certificado HTTPS. ¿Está bien la fecha y hora de la consola?"
-                            : "Error al descargar payloads.json");
+        explain_repo_error(dns);
         return -1;
     }
 
